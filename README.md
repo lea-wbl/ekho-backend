@@ -13,8 +13,25 @@ Standalone Node + MongoDB API for the EKHO app.
 1. Copy `.env.example` to `.env`.
 2. Set `MONGODB_URI`.
 3. Optionally set `GOOGLE_BOOKS_API_KEY` to proxy Google Books search through the backend.
-4. Install dependencies with `npm install`.
-5. Start the server with `npm run dev`.
+4. Set Clerk environment variables:
+   - `CLERK_PUBLISHABLE_KEY`
+   - `CLERK_SECRET_KEY`
+   - Optional: `CLERK_JWT_KEY` for networkless JWT verification
+   - Optional: `CLERK_AUTHORIZED_PARTIES` as a comma-separated allowlist
+5. Install dependencies with `npm install`.
+6. Start the server with `npm run dev`.
+
+## Auth
+
+- `GET /api/health` is public.
+- All other `/api` routes require a valid Clerk session token in the `Authorization: Bearer ...` header.
+- The backend verifies Clerk tokens with `@clerk/backend`.
+- `AUTH_MODE=development` is the current local default and uses `DEV_AUTH_USER_ID`.
+
+## Data ownership
+
+- `Book`, `ReadingSession`, and `ReadingDraft` are now user-scoped.
+- Existing MongoDB records created before this change do not have `userId` and will not be returned until migrated.
 
 ## API Summary
 

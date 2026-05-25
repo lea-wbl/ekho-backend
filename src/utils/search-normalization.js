@@ -1,6 +1,32 @@
 const COMBINING_MARKS_REGEX = /\p{M}+/gu;
 const PUNCTUATION_REGEX = /[^\p{L}\p{N}\s]/gu;
 const WHITESPACE_REGEX = /\s+/g;
+const SEARCH_NOISE_REGEX =
+  /\b(e book|ebook|tome|vol|volume|book)\b|\b[0-9ivxlcdm]+\b/u;
+const FRENCH_STOP_WORDS = new Set([
+  "a",
+  "au",
+  "aux",
+  "ce",
+  "ces",
+  "d",
+  "de",
+  "des",
+  "du",
+  "en",
+  "et",
+  "l",
+  "la",
+  "le",
+  "les",
+  "mais",
+  "ou",
+  "par",
+  "pour",
+  "sur",
+  "un",
+  "une",
+]);
 
 export function normalizeSearchText(input) {
   return String(input ?? "")
@@ -21,6 +47,43 @@ export function normalizedWordSequence(input) {
     .split(" ")
     .map((word) => word.trim())
     .filter(Boolean);
+}
+
+export function isNoiseWord(word) {
+  return SEARCH_NOISE_REGEX.test(String(word ?? "").trim());
+}
+
+export function extractMeaningfulSearchWords(input) {
+  return normalizedWordSequence(input).filter(
+    (word) => word.length > 0 && !FRENCH_STOP_WORDS.has(word) && !isNoiseWord(word),
+  );
+}
+
+export function buildSearchTokenPrefixes(inputs, options = {}) {
+  const values = Array.isArray(inputs) ? inputs : [inputs];
+  const minLength = Number.isInteger(options.minLength) ? options.minLength : 3;
+  const maxPrefixLength = Number.isInteger(options.maxPrefixLength)
+    ? options.maxPrefixLength
+    : 12;
+  const tokens = new Set();
+
+  for (const value of values) {
+    for (const word of extractMeaningfulSearchWords(value)) {
+      if (word.length < minLength) {
+        continue;
+      }
+
+      const maxLength = Math.min(word.length, maxPrefixLength);
+
+      for (let length = minLength; length <= maxLength; length += 1) {
+        tokens.add(word.slice(0, length));
+      }
+
+      tokens.add(word);
+    }
+  }
+
+  return Array.from(tokens);
 }
 
 export function buildFallbackQueries(input) {

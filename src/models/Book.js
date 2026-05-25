@@ -2,6 +2,12 @@ import mongoose from "mongoose";
 
 const bookSchema = new mongoose.Schema(
   {
+    userId: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
     title: {
       type: String,
       required: true,
@@ -80,5 +86,8 @@ const bookSchema = new mongoose.Schema(
     versionKey: false,
   },
 );
+
+bookSchema.index({ userId: 1, createdAt: 1 });
+bookSchema.index({ userId: 1, status: 1, lastReadAt: -1 });
 
 export const Book = mongoose.model("Book", bookSchema);

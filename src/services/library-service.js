@@ -5,12 +5,39 @@ import { ReadingDraft } from "../models/ReadingDraft.js";
 import { ReadingSession } from "../models/ReadingSession.js";
 import { upsertCatalogBookFromGoogleById } from "./google-books-service.js";
 import { HttpError } from "../utils/http-error.js";
-import { normalizeSearchText } from "../utils/search-normalization.js";
+import {
+  buildSearchTokenPrefixes,
+  normalizeSearchText,
+} from "../utils/search-normalization.js";
 
 const CORRECTION_PROMOTION_THRESHOLD = 2;
 const TITLE_SEGMENT_SEPARATORS_REGEX = /\s[-:|]\s/g;
 const TITLE_NOISE_REGEX =
   /\b(e book|ebook|tome|vol|volume|book)\b|\b[0-9ivxlcdm]+\b/gu;
+
+function getUserScope(auth) {
+  return { userId: auth.userId };
+}
+
+async function findOwnedBookOrThrow(auth, bookId) {
+  const book = await Book.findOne({ _id: bookId, ...getUserScope(auth) });
+
+  if (!book) {
+    throw new HttpError(404, "Book not found.");
+  }
+
+  return book;
+}
+
+async function findOwnedSessionOrThrow(auth, sessionId) {
+  const session = await ReadingSession.findOne({ _id: sessionId, ...getUserScope(auth) });
+
+  if (!session) {
+    throw new HttpError(404, "Reading session not found.");
+  }
+
+  return session;
+}
 
 const serializeEmbedded = (items = []) =>
   items.map((item) => ({
@@ -96,15 +123,18 @@ export function serializeDraft(draft) {
   };
 }
 
-async function clearFeaturedFlags() {
-  await Book.updateMany({ isFeatured: true }, { $set: { isFeatured: false } });
+async function clearFeaturedFlags(auth) {
+  await Book.updateMany(
+    { ...getUserScope(auth), isFeatured: true },
+    { $set: { isFeatured: false } },
+  );
 }
 
-export async function getLibrarySnapshot() {
+export async function getLibrarySnapshot(auth) {
   const [books, sessions, activeDraft] = await Promise.all([
-    Book.find().sort({ createdAt: 1, title: 1 }),
-    ReadingSession.find().sort({ createdAt: -1 }),
-    ReadingDraft.findOne().sort({ updatedAt: -1 }),
+    Book.find(getUserScope(auth)).sort({ createdAt: 1, title: 1 }),
+    ReadingSession.find(getUserScope(auth)).sort({ createdAt: -1 }),
+    ReadingDraft.findOne(getUserScope(auth)).sort({ updatedAt: -1 }),
   ]);
 
   const serializedBooks = books.map(serializeBook);
@@ -138,23 +168,17 @@ export async function getLibrarySnapshot() {
   };
 }
 
-export async function listBooks(status) {
-  const filter = status ? { status } : {};
+export async function listBooks(auth, status) {
+  const filter = status ? { ...getUserScope(auth), status } : getUserScope(auth);
   const books = await Book.find(filter).sort({ createdAt: 1, title: 1 });
   return books.map(serializeBook);
 }
 
-export async function getBookById(bookId) {
-  const book = await Book.findById(bookId);
-
-  if (!book) {
-    throw new HttpError(404, "Book not found.");
-  }
-
-  return serializeBook(book);
+export async function getBookById(auth, bookId) {
+  return serializeBook(await findOwnedBookOrThrow(auth, bookId));
 }
 
-export async function createBook(payload) {
+export async function createBook(auth, payload) {
   let catalogBookId = payload.catalogBookId ?? null;
   let sourceCatalogBook = null;
   let createCorrectionBaseline = null;
@@ -186,6 +210,7 @@ export async function createBook(payload) {
   }
 
   const createdBook = await Book.create({
+    userId: auth.userId,
     title: payload.title,
     author: payload.author,
     publisher: payload.publisher ?? "",
@@ -236,6 +261,12 @@ async function upsertCatalogBookFromSelectionPayload(selection, googleBookId) {
       ].filter(Boolean),
     ),
   ).join(" ");
+  const searchTokens = buildSearchTokenPrefixes([
+    normalizedTitle,
+    normalizedAuthor,
+    normalizedPublisher,
+    ...titleCandidates,
+  ]);
 
   return CatalogBook.findOneAndUpdate(
     { source: "google_books", sourceId: googleBookId },
@@ -260,6 +291,7 @@ async function upsertCatalogBookFromSelectionPayload(selection, googleBookId) {
           normalizedAuthor,
           normalizedPublisher,
           normalizedSearchBlob,
+          searchTokens,
         },
         quality: {
           hasCover: Boolean(thumbnail),
@@ -315,12 +347,8 @@ function getSourceSelectionSharedValues(sourceSelection) {
   };
 }
 
-export async function updateBookDetails(bookId, payload) {
-  const book = await Book.findById(bookId);
-
-  if (!book) {
-    throw new HttpError(404, "Book not found.");
-  }
+export async function updateBookDetails(auth, bookId, payload) {
+  const book = await findOwnedBookOrThrow(auth, bookId);
 
   const previousSharedValues = {
     title: book.title,
@@ -468,6 +496,7 @@ function applyCanonicalCorrection(catalogBook, field, value) {
     .filter(Boolean);
 
   catalogBook.search.normalizedSearchBlob = Array.from(new Set(normalizedValues)).join(" ");
+  catalogBook.search.searchTokens = buildSearchTokenPrefixes(normalizedValues);
 }
 
 function buildTitleCandidates(title) {
@@ -564,46 +593,34 @@ async function aggregateCatalogCorrectionSuggestions(match) {
   });
 }
 
-export async function deleteBookById(bookId) {
-  const book = await Book.findById(bookId);
-
-  if (!book) {
-    throw new HttpError(404, "Book not found.");
-  }
+export async function deleteBookById(auth, bookId) {
+  const book = await findOwnedBookOrThrow(auth, bookId);
 
   await Promise.all([
-    Book.deleteOne({ _id: book._id }),
-    ReadingSession.deleteMany({ bookId: book._id }),
-    ReadingDraft.deleteMany({ bookId: book._id }),
+    Book.deleteOne({ _id: book._id, ...getUserScope(auth) }),
+    ReadingSession.deleteMany({ ...getUserScope(auth), bookId: book._id }),
+    ReadingDraft.deleteMany({ ...getUserScope(auth), bookId: book._id }),
   ]);
 
   return { ok: true };
 }
 
-export async function setFeaturedBook(bookId) {
-  const book = await Book.findById(bookId);
-
-  if (!book) {
-    throw new HttpError(404, "Book not found.");
-  }
+export async function setFeaturedBook(auth, bookId) {
+  const book = await findOwnedBookOrThrow(auth, bookId);
 
   if (book.status !== "reading") {
     throw new HttpError(400, "Only reading books can be featured.");
   }
 
-  await clearFeaturedFlags();
+  await clearFeaturedFlags(auth);
   book.isFeatured = true;
   await book.save();
 
   return serializeBook(book);
 }
 
-export async function updateBookReview(bookId, payload) {
-  const book = await Book.findById(bookId);
-
-  if (!book) {
-    throw new HttpError(404, "Book not found.");
-  }
+export async function updateBookReview(auth, bookId, payload) {
+  const book = await findOwnedBookOrThrow(auth, bookId);
 
   if (typeof payload.rating === "number") {
     book.rating = payload.rating;
@@ -617,10 +634,10 @@ export async function updateBookReview(bookId, payload) {
   return serializeBook(book);
 }
 
-export async function getBookRecap(bookId) {
+export async function getBookRecap(auth, bookId) {
   const [book, sessions] = await Promise.all([
-    Book.findById(bookId),
-    ReadingSession.find({ bookId }).sort({ createdAt: 1 }),
+    Book.findOne({ _id: bookId, ...getUserScope(auth) }),
+    ReadingSession.find({ ...getUserScope(auth), bookId }).sort({ createdAt: 1 }),
   ]);
 
   if (!book) {
@@ -654,8 +671,10 @@ export async function getBookRecap(bookId) {
   };
 }
 
-export async function getLatestSessionForBook(bookId) {
-  const session = await ReadingSession.findOne({ bookId }).sort({ createdAt: -1 });
+export async function getLatestSessionForBook(auth, bookId) {
+  const session = await ReadingSession.findOne({ ...getUserScope(auth), bookId }).sort({
+    createdAt: -1,
+  });
   return serializeSession(session);
 }
 
@@ -746,23 +765,20 @@ export async function moderateCatalogCorrectionSuggestion({
   return updatedAggregate ?? null;
 }
 
-export async function getActiveDraft() {
-  const draft = await ReadingDraft.findOne().sort({ updatedAt: -1 });
+export async function getActiveDraft(auth) {
+  const draft = await ReadingDraft.findOne(getUserScope(auth)).sort({ updatedAt: -1 });
   return serializeDraft(draft);
 }
 
-export async function startDraftForBook(bookId) {
-  const book = await Book.findById(bookId);
+export async function startDraftForBook(auth, bookId) {
+  const book = await findOwnedBookOrThrow(auth, bookId);
 
-  if (!book) {
-    throw new HttpError(404, "Book not found.");
-  }
+  await ReadingDraft.deleteMany(getUserScope(auth));
 
-  await ReadingDraft.deleteMany({});
-
-  const hasSavedSessions = await ReadingSession.exists({ bookId });
+  const hasSavedSessions = await ReadingSession.exists({ ...getUserScope(auth), bookId });
   const startPage = Math.max(1, book.currentPage || 1);
   const draft = await ReadingDraft.create({
+    userId: auth.userId,
     bookId: book._id,
     startPage,
     currentPage: startPage,
@@ -772,7 +788,7 @@ export async function startDraftForBook(bookId) {
   });
 
   if (book.status === "reading") {
-    await clearFeaturedFlags();
+    await clearFeaturedFlags(auth);
     book.isFeatured = true;
     await book.save();
   }
@@ -780,8 +796,8 @@ export async function startDraftForBook(bookId) {
   return serializeDraft(draft);
 }
 
-async function requireDraft() {
-  const draft = await ReadingDraft.findOne().sort({ updatedAt: -1 });
+async function requireDraft(auth) {
+  const draft = await ReadingDraft.findOne(getUserScope(auth)).sort({ updatedAt: -1 });
 
   if (!draft) {
     throw new HttpError(404, "No active draft found.");
@@ -790,13 +806,9 @@ async function requireDraft() {
   return draft;
 }
 
-export async function updateDraftPage(currentPage) {
-  const draft = await requireDraft();
-  const book = await Book.findById(draft.bookId);
-
-  if (!book) {
-    throw new HttpError(404, "Book not found.");
-  }
+export async function updateDraftPage(auth, currentPage) {
+  const draft = await requireDraft(auth);
+  const book = await findOwnedBookOrThrow(auth, draft.bookId);
 
   draft.currentPage = Math.min(Math.max(1, currentPage), book.totalPages);
   await draft.save();
@@ -804,15 +816,15 @@ export async function updateDraftPage(currentPage) {
   return serializeDraft(draft);
 }
 
-export async function addNoteToDraft(content, noteReference, chapters = []) {
-  const draft = await requireDraft();
+export async function addNoteToDraft(auth, content, noteReference, chapters = []) {
+  const draft = await requireDraft(auth);
   draft.notes.push({ content, noteReference, chapters });
   await draft.save();
   return serializeDraft(draft);
 }
 
-export async function updateDraftNote(noteId, content, noteReference, chapters = []) {
-  const draft = await requireDraft();
+export async function updateDraftNote(auth, noteId, content, noteReference, chapters = []) {
+  const draft = await requireDraft(auth);
   const note = draft.notes.id(noteId);
 
   if (!note) {
@@ -826,30 +838,27 @@ export async function updateDraftNote(noteId, content, noteReference, chapters =
   return serializeDraft(draft);
 }
 
-export async function addQuoteToDraft(content, page, speaker = "") {
-  const draft = await requireDraft();
+export async function addQuoteToDraft(auth, content, page, speaker = "") {
+  const draft = await requireDraft(auth);
   draft.quotes.push({ content, page, speaker });
   await draft.save();
   return serializeDraft(draft);
 }
 
-export async function discardDraft() {
-  const draft = await requireDraft();
-  await ReadingDraft.deleteOne({ _id: draft._id });
+export async function discardDraft(auth) {
+  const draft = await requireDraft(auth);
+  await ReadingDraft.deleteOne({ _id: draft._id, ...getUserScope(auth) });
   return { success: true };
 }
 
-async function persistActiveDraft(options = {}) {
-  const draft = await requireDraft();
-  const book = await Book.findById(draft.bookId);
-
-  if (!book) {
-    throw new HttpError(404, "Book not found.");
-  }
+async function persistActiveDraft(auth, options = {}) {
+  const draft = await requireDraft(auth);
+  const book = await findOwnedBookOrThrow(auth, draft.bookId);
 
   const now = new Date();
   const shouldFinishBook = options.finishBook === true || draft.currentPage >= book.totalPages;
   const session = await ReadingSession.create({
+    userId: auth.userId,
     bookId: draft.bookId,
     startPage: draft.startPage,
     endPage: draft.currentPage,
@@ -877,7 +886,7 @@ async function persistActiveDraft(options = {}) {
     createdAt: now,
   });
 
-  await clearFeaturedFlags();
+  await clearFeaturedFlags(auth);
 
   book.status = shouldFinishBook ? "finished" : "reading";
   book.currentPage = draft.currentPage;
@@ -887,7 +896,7 @@ async function persistActiveDraft(options = {}) {
   book.isFeatured = !shouldFinishBook;
 
   await book.save();
-  await ReadingDraft.deleteOne({ _id: draft._id });
+  await ReadingDraft.deleteOne({ _id: draft._id, ...getUserScope(auth) });
 
   return {
     book: serializeBook(book),
@@ -895,20 +904,16 @@ async function persistActiveDraft(options = {}) {
   };
 }
 
-export async function saveDraft() {
-  return persistActiveDraft();
+export async function saveDraft(auth) {
+  return persistActiveDraft(auth);
 }
 
-export async function finishDraft() {
-  return persistActiveDraft({ finishBook: true });
+export async function finishDraft(auth) {
+  return persistActiveDraft(auth, { finishBook: true });
 }
 
-export async function dismissReminder(sessionId, reminderDismissed) {
-  const session = await ReadingSession.findById(sessionId);
-
-  if (!session) {
-    throw new HttpError(404, "Reading session not found.");
-  }
+export async function dismissReminder(auth, sessionId, reminderDismissed) {
+  const session = await findOwnedSessionOrThrow(auth, sessionId);
 
   session.reminderDismissed = reminderDismissed;
   await session.save();
@@ -916,12 +921,14 @@ export async function dismissReminder(sessionId, reminderDismissed) {
   return serializeSession(session);
 }
 
-export async function addNoteToSavedSession(sessionId, content, noteReference, chapters = []) {
-  const session = await ReadingSession.findById(sessionId);
-
-  if (!session) {
-    throw new HttpError(404, "Reading session not found.");
-  }
+export async function addNoteToSavedSession(
+  auth,
+  sessionId,
+  content,
+  noteReference,
+  chapters = [],
+) {
+  const session = await findOwnedSessionOrThrow(auth, sessionId);
 
   session.notes.push({ content, noteReference, chapters });
   session.reminderDismissed = false;
@@ -930,40 +937,8 @@ export async function addNoteToSavedSession(sessionId, content, noteReference, c
   return serializeSession(session);
 }
 
-export async function seedLibrary() {
-  const existingBooks = await Book.countDocuments();
-
-  if (existingBooks > 0) {
-    return {
-      seeded: false,
-    };
-  }
-
-  await Book.insertMany([
-    {
-      title: "Blood Over Bright Haven",
-      author: "M. L. Wang",
-      totalPages: 612,
-      status: "tbr",
-      currentPage: 0,
-    },
-    {
-      title: "Anathema",
-      author: "Keri Lake",
-      totalPages: 588,
-      status: "tbr",
-      currentPage: 0,
-    },
-    {
-      title: "Dire Bound",
-      author: "Sable Sorensen",
-      totalPages: 435,
-      status: "tbr",
-      currentPage: 0,
-    },
-  ]);
-
+export async function seedLibrary(auth) {
   return {
-    seeded: true,
+    seeded: false,
   };
 }

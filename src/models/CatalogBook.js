@@ -134,6 +134,10 @@ const catalogBookSchema = new mongoose.Schema(
         trim: true,
         default: "",
       },
+      searchTokens: {
+        type: [String],
+        default: [],
+      },
     },
     quality: {
       hasCover: {
@@ -166,5 +170,6 @@ const catalogBookSchema = new mongoose.Schema(
 );
 
 catalogBookSchema.index({ source: 1, sourceId: 1 }, { unique: true });
+catalogBookSchema.index({ "search.searchTokens": 1 });
 
 export const CatalogBook = mongoose.model("CatalogBook", catalogBookSchema);

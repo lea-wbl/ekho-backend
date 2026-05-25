@@ -2,7 +2,8 @@ import { env } from "../config/env.js";
 import { CatalogBook } from "../models/CatalogBook.js";
 import { HttpError } from "../utils/http-error.js";
 import {
-  buildFallbackQueries,
+  buildSearchTokenPrefixes,
+  extractMeaningfulSearchWords,
   normalizeSearchText,
 } from "../utils/search-normalization.js";
 
@@ -11,34 +12,11 @@ const MIN_PAGE_COUNT = 200;
 const MAX_RESULTS = 20;
 const SEARCH_RESULT_LIMIT = 20;
 const MIN_RESULTS_BEFORE_FALLBACK = 8;
+const MIN_RESULTS_BEFORE_FULLTEXT_FALLBACK = 3;
 const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000;
 const TITLE_SEGMENT_SEPARATORS_REGEX = /\s[-:|]\s/g;
 const TITLE_NOISE_REGEX =
   /\b(e book|ebook|tome|vol|volume|book)\b|\b[0-9ivxlcdm]+\b/gu;
-const FRENCH_STOP_WORDS = new Set([
-  "a",
-  "au",
-  "aux",
-  "ce",
-  "ces",
-  "d",
-  "de",
-  "des",
-  "du",
-  "en",
-  "et",
-  "l",
-  "la",
-  "le",
-  "les",
-  "mais",
-  "ou",
-  "par",
-  "pour",
-  "sur",
-  "un",
-  "une",
-]);
 const searchCache = new Map();
 
 export async function searchGoogleBooks(query) {
@@ -142,31 +120,11 @@ async function findGoogleSearchResults(query) {
 
 function buildGoogleBooksRequestVariants(query) {
   const rawQuery = String(query ?? "").trim();
-  const normalizedQuery = normalizeSearchText(query);
-  const meaningfulWordCount = normalizedQuery.split(" ").filter(Boolean).length;
-  const queryVariants = buildFallbackQueries(query).filter(
-    (variant) => variant.length >= MIN_SEARCH_LENGTH,
-  );
   const requests = new Map();
 
   if (rawQuery.length >= MIN_SEARCH_LENGTH) {
     const primaryRequest = { query: rawQuery, mode: "intitle" };
     requests.set(`${primaryRequest.mode}:${primaryRequest.query}`, primaryRequest);
-  }
-
-  for (const variant of queryVariants) {
-    const variantWordCount = normalizeSearchText(variant).split(" ").filter(Boolean).length;
-
-    if (meaningfulWordCount > 1 && variantWordCount < 2) {
-      continue;
-    }
-
-    const request = { query: variant, mode: "intitle" };
-    requests.set(`${request.mode}:${request.query}`, request);
-
-    if (requests.size >= 3) {
-      break;
-    }
   }
 
   if (rawQuery.length >= MIN_SEARCH_LENGTH) {
@@ -178,35 +136,16 @@ function buildGoogleBooksRequestVariants(query) {
 }
 
 async function findCatalogCandidates(query) {
-  const rawQuery = String(query ?? "").trim();
-  const normalizedQuery = normalizeSearchText(query);
-  const normalizedWords = normalizedQuery.split(" ").filter(Boolean);
-  const queryVariants = buildFallbackQueries(query)
-    .map((variant) => normalizeSearchText(variant))
-    .filter((variant) => variant.length >= MIN_SEARCH_LENGTH);
-  const regexPatterns = Array.from(
-    new Set([
-      ...queryVariants,
-      rawQuery ? normalizeSearchText(rawQuery) : "",
-      ...normalizedWords,
-    ].filter(Boolean)),
+  const queryTokens = extractMeaningfulSearchWords(query).filter(
+    (word) => word.length >= MIN_SEARCH_LENGTH,
   );
 
-  if (regexPatterns.length === 0) {
+  if (queryTokens.length === 0) {
     return [];
   }
 
-  const regexClauses = regexPatterns.map((pattern) => ({
-    $or: [
-      { "search.normalizedSearchBlob": { $regex: escapeRegex(pattern), $options: "i" } },
-      { "search.normalizedTitle": { $regex: escapeRegex(pattern), $options: "i" } },
-      { "search.normalizedSubtitle": { $regex: escapeRegex(pattern), $options: "i" } },
-      { "search.normalizedAuthor": { $regex: escapeRegex(pattern), $options: "i" } },
-    ],
-  }));
-
   return CatalogBook.find({
-    $or: regexClauses,
+    "search.searchTokens": { $all: queryTokens },
   })
     .sort({ updatedAt: -1, createdAt: -1 })
     .limit(50);
@@ -245,10 +184,13 @@ async function fetchSearchItemsWithFallback(requestVariants, query) {
       );
     }
 
-    if (
-      index === 0 &&
-      countRankedSearchResults(dedupedItems, query) >= MIN_RESULTS_BEFORE_FALLBACK
-    ) {
+    const rankedResultCount = countRankedSearchResults(dedupedItems, query);
+
+    if (index === 0 && rankedResultCount >= MIN_RESULTS_BEFORE_FALLBACK) {
+      break;
+    }
+
+    if (index === 0 && rankedResultCount >= MIN_RESULTS_BEFORE_FULLTEXT_FALLBACK) {
       break;
     }
   }
@@ -292,10 +234,6 @@ function setCachedSearchResults(normalizedQuery, results) {
     results,
     expiresAt: Date.now() + SEARCH_CACHE_TTL_MS,
   });
-}
-
-function escapeRegex(value) {
-  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function buildGoogleBooksQuery(request) {
@@ -358,6 +296,15 @@ async function upsertCatalogBookFromGoogle(item) {
       ...aliases,
     ].filter(Boolean)),
   ).join(" ");
+  const searchTokens = buildSearchTokenPrefixes([
+    normalizedTitle,
+    normalizedSubtitle,
+    normalizedAuthor,
+    normalizedPublisher,
+    ...titleCandidates,
+    ...subtitleCandidates,
+    ...aliases,
+  ]);
   const hasIsbn = Boolean(extractIsbn(rawIdentifiers));
   const hasCover = Boolean(rawThumbnail);
 
@@ -384,6 +331,7 @@ async function upsertCatalogBookFromGoogle(item) {
           normalizedAuthor,
           normalizedPublisher,
           normalizedSearchBlob,
+          searchTokens,
         },
         quality: {
           hasCover,
@@ -606,7 +554,7 @@ function computeQueryMatchScore(result, query) {
 }
 
 function matchesRequiredQueryWords(result, query) {
-  const requiredWords = extractMeaningfulQueryWords(query);
+  const requiredWords = extractMeaningfulSearchWords(query);
   const searchCandidates = buildSearchCandidates(result);
   const titleCandidateWords = new Set(
     searchCandidates.flatMap((candidate) => candidate.split(" ")).filter(Boolean),
@@ -627,24 +575,6 @@ function matchesRequiredQueryWords(result, query) {
 
   return requiredWords.every((word) =>
     candidateWords.some((candidateWord) => candidateWord.startsWith(word)),
-  );
-}
-
-function extractMeaningfulQueryWords(query) {
-  return normalizeSearchText(query)
-    .split(" ")
-    .map((word) => word.trim())
-    .filter(
-      (word) =>
-        word.length > 0 &&
-        !FRENCH_STOP_WORDS.has(word) &&
-        !isNoiseWord(word),
-    );
-}
-
-function isNoiseWord(word) {
-  return Boolean(
-    word.match(/\b(e book|ebook|tome|vol|volume|book)\b|\b[0-9ivxlcdm]+\b/u),
   );
 }
 

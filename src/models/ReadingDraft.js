@@ -62,11 +62,16 @@ const quoteSchema = new mongoose.Schema(
 
 const readingDraftSchema = new mongoose.Schema(
   {
+    userId: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
     bookId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Book",
       required: true,
-      unique: true,
     },
     startPage: {
       type: Number,
@@ -97,5 +102,8 @@ const readingDraftSchema = new mongoose.Schema(
     versionKey: false,
   },
 );
+
+readingDraftSchema.index({ userId: 1, bookId: 1 }, { unique: true });
+readingDraftSchema.index({ userId: 1, updatedAt: -1 });
 
 export const ReadingDraft = mongoose.model("ReadingDraft", readingDraftSchema);

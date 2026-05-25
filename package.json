@@ -7,12 +7,14 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "check": "node --check src/server.js"
+    "check": "node --check src/server.js",
+    "catalog:backfill-search": "node src/scripts/backfill-catalog-search-tokens.js"
   },
   "engines": {
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@clerk/backend": "^3.4.13",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",

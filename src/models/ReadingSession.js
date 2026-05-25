@@ -62,6 +62,12 @@ const quoteSchema = new mongoose.Schema(
 
 const readingSessionSchema = new mongoose.Schema(
   {
+    userId: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
     bookId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Book",
@@ -100,5 +106,7 @@ const readingSessionSchema = new mongoose.Schema(
     versionKey: false,
   },
 );
+
+readingSessionSchema.index({ userId: 1, bookId: 1, createdAt: -1 });
 
 export const ReadingSession = mongoose.model("ReadingSession", readingSessionSchema);

@@ -45,12 +45,12 @@ export async function healthCheck(_request, response) {
 }
 
 export async function getLibrary(_request, response) {
-  response.json(await getLibrarySnapshot());
+  response.json(await getLibrarySnapshot(_request.auth));
 }
 
 export async function getBooks(request, response) {
   const status = optionalString(request.query.status);
-  response.json(await listBooks(status || undefined));
+  response.json(await listBooks(request.auth, status || undefined));
 }
 
 export async function getCatalogCorrections(request, response) {
@@ -107,7 +107,7 @@ export async function patchCatalogCorrection(request, response) {
 }
 
 export async function getBook(request, response) {
-  response.json(await getBookById(request.params.bookId));
+  response.json(await getBookById(request.auth, request.params.bookId));
 }
 
 export async function createTbrBook(request, response) {
@@ -139,7 +139,7 @@ export async function createTbrBook(request, response) {
   }
 
   response.status(201).json(
-    await createBook({
+    await createBook(request.auth, {
       title,
       author,
       totalPages,
@@ -163,7 +163,7 @@ export async function patchBookDetails(request, response) {
   const totalPages = requirePositiveInteger(request.body.totalPages, "totalPages");
 
   response.json(
-    await updateBookDetails(request.params.bookId, {
+    await updateBookDetails(request.auth, request.params.bookId, {
       title,
       author,
       totalPages,
@@ -174,11 +174,11 @@ export async function patchBookDetails(request, response) {
 }
 
 export async function deleteBook(request, response) {
-  response.json(await deleteBookById(request.params.bookId));
+  response.json(await deleteBookById(request.auth, request.params.bookId));
 }
 
 export async function featureBook(request, response) {
-  response.json(await setFeaturedBook(request.params.bookId));
+  response.json(await setFeaturedBook(request.auth, request.params.bookId));
 }
 
 export async function saveReview(request, response) {
@@ -192,67 +192,72 @@ export async function saveReview(request, response) {
     payload.globalFeeling = optionalString(request.body.globalFeeling);
   }
 
-  response.json(await updateBookReview(request.params.bookId, payload));
+  response.json(await updateBookReview(request.auth, request.params.bookId, payload));
 }
 
 export async function getRecap(request, response) {
-  response.json(await getBookRecap(request.params.bookId));
+  response.json(await getBookRecap(request.auth, request.params.bookId));
 }
 
 export async function getLatestSession(request, response) {
-  response.json(await getLatestSessionForBook(request.params.bookId));
+  response.json(await getLatestSessionForBook(request.auth, request.params.bookId));
 }
 
 export async function getDraft(_request, response) {
-  response.json(await getActiveDraft());
+  response.json(await getActiveDraft(_request.auth));
 }
 
 export async function startDraft(request, response) {
   const bookId = requireString(request.body.bookId, "bookId");
-  response.status(201).json(await startDraftForBook(bookId));
+  response.status(201).json(await startDraftForBook(request.auth, bookId));
 }
 
 export async function patchDraftPage(request, response) {
   const currentPage = requirePositiveInteger(request.body.currentPage, "currentPage");
-  response.json(await updateDraftPage(currentPage));
+  response.json(await updateDraftPage(request.auth, currentPage));
 }
 
 export async function createDraftNote(request, response) {
   const content = requireString(request.body.content, "content");
   const noteReference = optionalNoteReference(request.body.noteReference, "noteReference");
   const chapters = optionalStringArray(request.body.chapters, "chapters");
-  response.status(201).json(await addNoteToDraft(content, noteReference, chapters));
+  response
+    .status(201)
+    .json(await addNoteToDraft(request.auth, content, noteReference, chapters));
 }
 
 export async function patchDraftNote(request, response) {
   const content = requireString(request.body.content, "content");
   const noteReference = optionalNoteReference(request.body.noteReference, "noteReference");
   const chapters = optionalStringArray(request.body.chapters, "chapters");
-  response.json(await updateDraftNote(request.params.noteId, content, noteReference, chapters));
+  response.json(
+    await updateDraftNote(request.auth, request.params.noteId, content, noteReference, chapters),
+  );
 }
 
 export async function createDraftQuote(request, response) {
   const content = requireString(request.body.content, "content");
   const page = requirePositiveInteger(request.body.page, "page");
   const speaker = optionalString(request.body.speaker);
-  response.status(201).json(await addQuoteToDraft(content, page, speaker));
+  response.status(201).json(await addQuoteToDraft(request.auth, content, page, speaker));
 }
 
 export async function deleteDraft(_request, response) {
-  response.json(await discardDraft());
+  response.json(await discardDraft(_request.auth));
 }
 
 export async function persistDraft(_request, response) {
-  response.json(await saveDraft());
+  response.json(await saveDraft(_request.auth));
 }
 
 export async function persistAndFinishDraft(_request, response) {
-  response.json(await finishDraft());
+  response.json(await finishDraft(_request.auth));
 }
 
 export async function patchReminder(request, response) {
   response.json(
     await dismissReminder(
+      request.auth,
       request.params.sessionId,
       request.body.reminderDismissed === undefined ? true : Boolean(request.body.reminderDismissed),
     ),
@@ -265,9 +270,17 @@ export async function createSessionNote(request, response) {
   const chapters = optionalStringArray(request.body.chapters, "chapters");
   response
     .status(201)
-    .json(await addNoteToSavedSession(request.params.sessionId, content, noteReference, chapters));
+    .json(
+      await addNoteToSavedSession(
+        request.auth,
+        request.params.sessionId,
+        content,
+        noteReference,
+        chapters,
+      ),
+    );
 }
 
 export async function seed(_request, response) {
-  response.status(201).json(await seedLibrary());
+  response.status(201).json(await seedLibrary(_request.auth));
 }

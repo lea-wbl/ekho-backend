@@ -16,7 +16,6 @@ import {
   getLatestSession,
   getLibrary,
   getRecap,
-  healthCheck,
   patchCatalogCorrection,
   patchDraftPage,
   patchDraftNote,
@@ -32,7 +31,6 @@ import {
 
 export const libraryRouter = Router();
 
-libraryRouter.get("/health", asyncHandler(healthCheck));
 libraryRouter.post("/seed", asyncHandler(seed));
 libraryRouter.get("/library", asyncHandler(getLibrary));
 libraryRouter.get("/books", asyncHandler(getBooks));
