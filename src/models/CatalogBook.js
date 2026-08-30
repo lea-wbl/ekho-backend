@@ -20,7 +20,7 @@ const catalogBookSchema = new mongoose.Schema(
   {
     source: {
       type: String,
-      enum: ["google_books"],
+      enum: ["google_books", "manual_submission"],
       default: "google_books",
       required: true,
     },
@@ -94,6 +94,11 @@ const catalogBookSchema = new mongoose.Schema(
         type: String,
         trim: true,
         default: "",
+      },
+      seriesNumber: {
+        type: Number,
+        min: 1,
+        default: null,
       },
     },
     search: {

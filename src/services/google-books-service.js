@@ -14,6 +14,8 @@ const SEARCH_RESULT_LIMIT = 20;
 const MIN_RESULTS_BEFORE_FALLBACK = 8;
 const MIN_RESULTS_BEFORE_FULLTEXT_FALLBACK = 3;
 const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_FUZZY_CATALOG_CANDIDATES = 150;
+const MAX_QUERY_PREFIX_LENGTH = 5;
 const TITLE_SEGMENT_SEPARATORS_REGEX = /\s[-:|]\s/g;
 const TITLE_NOISE_REGEX =
   /\b(e book|ebook|tome|vol|volume|book)\b|\b[0-9ivxlcdm]+\b/gu;
@@ -54,6 +56,42 @@ export async function searchGoogleBooks(query) {
 
   setCachedSearchResults(normalizedQuery, serializedResults);
   return serializedResults;
+}
+
+export async function searchBookByIsbn(rawIsbn) {
+  const isbnVariants = buildIsbnVariants(rawIsbn);
+
+  if (isbnVariants.length === 0) {
+    throw new HttpError(400, "isbn is invalid.");
+  }
+
+  const catalogBook = await CatalogBook.findOne({
+    "raw.industryIdentifiers.identifier": { $in: isbnVariants },
+  }).sort({ updatedAt: -1, createdAt: -1 });
+
+  const catalogResult = mapCatalogBookToExactLookupResult(catalogBook);
+
+  if (catalogResult) {
+    return catalogResult;
+  }
+
+  if (!env.googleBooksApiKey) {
+    throw new HttpError(400, "GOOGLE_BOOKS_API_KEY is not configured.");
+  }
+
+  const response = await fetchGoogleBooksVolumes({
+    query: `isbn:${isbnVariants[0]}`,
+    mode: "fulltext",
+  });
+  const exactResult = (response.items ?? [])
+    .map(mapGoogleItemToExactLookupResult)
+    .find(Boolean);
+
+  if (!exactResult) {
+    throw new HttpError(404, "No book found for that barcode.");
+  }
+
+  return exactResult;
 }
 
 export async function upsertCatalogBookFromGoogleById(googleBookId) {
@@ -98,11 +136,29 @@ async function fetchGoogleBooksVolumes(request) {
 }
 
 async function findCatalogSearchResults(query) {
-  const candidates = await findCatalogCandidates(query);
-
-  return candidates
+  const strictCandidates = await findCatalogCandidates(query);
+  const strictResults = strictCandidates
     .map(mapCatalogBookToSearchResult)
     .filter((result) => result !== null);
+
+  if (strictResults.length >= MIN_RESULTS_BEFORE_FALLBACK) {
+    return strictResults;
+  }
+
+  const strictCandidateIds = new Set(
+    strictCandidates.map((candidate) => candidate?._id?.toString?.()).filter(Boolean),
+  );
+  const fuzzyCandidates = await findFuzzyCatalogCandidates(query, strictCandidateIds);
+  const fuzzyResults = fuzzyCandidates
+    .map(mapCatalogBookToSearchResult)
+    .filter((result) => result !== null)
+    .map((result) => ({
+      ...result,
+      typoMatchScore: computeTypoMatchScore(result, query),
+    }))
+    .filter((result) => result.typoMatchScore > 0);
+
+  return [...strictResults, ...fuzzyResults];
 }
 
 async function findGoogleSearchResults(query) {
@@ -149,6 +205,25 @@ async function findCatalogCandidates(query) {
   })
     .sort({ updatedAt: -1, createdAt: -1 })
     .limit(50);
+}
+
+async function findFuzzyCatalogCandidates(query, excludedIds = new Set()) {
+  const queryPrefixes = buildSearchTokenPrefixes(query, {
+    minLength: MIN_SEARCH_LENGTH,
+    maxPrefixLength: MAX_QUERY_PREFIX_LENGTH,
+  });
+  const excludedObjectIds = Array.from(excludedIds).filter(Boolean);
+
+  if (queryPrefixes.length === 0) {
+    return [];
+  }
+
+  return CatalogBook.find({
+    ...(excludedObjectIds.length > 0 ? { _id: { $nin: excludedObjectIds } } : {}),
+    "search.searchTokens": { $in: queryPrefixes },
+  })
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .limit(MAX_FUZZY_CATALOG_CANDIDATES);
 }
 
 async function fetchSearchItemsWithFallback(requestVariants, query) {
@@ -386,20 +461,20 @@ function mapCatalogBookToSearchResult(catalogBook) {
 
   if (
     !catalogBook?._id ||
-    !catalogBook?.sourceId ||
     !title ||
     !author ||
-    !publisher ||
     !totalPages ||
     totalPages < MIN_PAGE_COUNT ||
-    !thumbnail
+    (!publisher && catalogBook?.source !== "manual_submission") ||
+    (!thumbnail && catalogBook?.source !== "manual_submission")
   ) {
     return null;
   }
 
   return {
     catalogBookId: catalogBook._id.toString(),
-    googleBookId: catalogBook.sourceId,
+    googleBookId:
+      catalogBook?.source === "google_books" ? String(catalogBook.sourceId ?? "").trim() : "",
     title,
     subtitle,
     author,
@@ -410,6 +485,43 @@ function mapCatalogBookToSearchResult(catalogBook) {
     thumbnail,
     aliases: Array.isArray(catalogBook?.search?.aliases) ? catalogBook.search.aliases : [],
     sourceType: "catalog",
+  };
+}
+
+function mapCatalogBookToExactLookupResult(catalogBook) {
+  if (!catalogBook?._id) {
+    return null;
+  }
+
+  const title = String(
+    catalogBook?.canonical?.title || catalogBook?.raw?.title || "",
+  ).trim();
+  const subtitle = String(
+    catalogBook?.canonical?.subtitle || catalogBook?.raw?.subtitle || "",
+  ).trim();
+  const author = String(
+    catalogBook?.canonical?.author || catalogBook?.raw?.authors?.[0] || "",
+  ).trim();
+
+  if (!title || !author) {
+    return null;
+  }
+
+  return {
+    catalogBookId: catalogBook._id.toString(),
+    googleBookId:
+      catalogBook?.source === "google_books" ? String(catalogBook.sourceId ?? "").trim() : "",
+    title,
+    subtitle,
+    author,
+    publisher: String(
+      catalogBook?.canonical?.publisher || catalogBook?.raw?.publisher || "",
+    ).trim(),
+    totalPages:
+      typeof catalogBook?.raw?.pageCount === "number" && catalogBook.raw.pageCount > 0
+        ? catalogBook.raw.pageCount
+        : null,
+    thumbnail: String(catalogBook?.raw?.thumbnail ?? "").trim(),
   };
 }
 
@@ -469,6 +581,35 @@ function mapGoogleItemToSearchResult(item) {
   };
 }
 
+function mapGoogleItemToExactLookupResult(item) {
+  const volumeInfo = item?.volumeInfo ?? {};
+  const title = typeof volumeInfo.title === "string" ? volumeInfo.title.trim() : "";
+  const subtitle =
+    typeof volumeInfo.subtitle === "string" ? volumeInfo.subtitle.trim() : "";
+  const author = Array.isArray(volumeInfo.authors)
+    ? volumeInfo.authors.find(Boolean)?.trim?.() ?? ""
+    : "";
+
+  if (!item?.id || !title || !author) {
+    return null;
+  }
+
+  return {
+    catalogBookId: null,
+    googleBookId: item.id,
+    title,
+    subtitle,
+    author,
+    publisher:
+      typeof volumeInfo.publisher === "string" ? volumeInfo.publisher.trim() : "",
+    totalPages:
+      typeof volumeInfo.pageCount === "number" && volumeInfo.pageCount > 0
+        ? volumeInfo.pageCount
+        : null,
+    thumbnail: pickThumbnail(volumeInfo.imageLinks),
+  };
+}
+
 function normalizeSupportedLanguage(language) {
   const normalized = String(language ?? "").trim().toLowerCase();
 
@@ -520,6 +661,8 @@ function compareSearchResults(left, right, query) {
 function computeQueryMatchScore(result, query) {
   const normalizedQuery = normalizeSearchText(query);
   const searchCandidates = buildSearchCandidates(result);
+  const typoMatchScore =
+    typeof result.typoMatchScore === "number" ? result.typoMatchScore : 0;
 
   if (searchCandidates.some((candidate) => candidate === normalizedQuery)) {
     return 500;
@@ -550,10 +693,17 @@ function computeQueryMatchScore(result, query) {
     );
   }
 
-  return bestTokenScore;
+  return Math.max(bestTokenScore, typoMatchScore);
 }
 
 function matchesRequiredQueryWords(result, query) {
+  if (
+    typeof result.typoMatchScore === "number" &&
+    result.typoMatchScore > 0
+  ) {
+    return true;
+  }
+
   const requiredWords = extractMeaningfulSearchWords(query);
   const searchCandidates = buildSearchCandidates(result);
   const titleCandidateWords = new Set(
@@ -607,6 +757,153 @@ function buildSearchCandidates(result) {
       ...(Array.isArray(result.aliases) ? result.aliases.map((alias) => normalizeSearchText(alias)) : []),
     ].filter(Boolean)),
   );
+}
+
+function buildCandidateWords(result) {
+  return Array.from(
+    new Set(
+      [
+        ...buildSearchCandidates(result).flatMap((candidate) => candidate.split(" ")),
+        ...normalizeSearchText(result.author).split(" "),
+        ...normalizeSearchText(result.publisher).split(" "),
+      ]
+        .map((word) => word.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function computeTypoMatchScore(result, query) {
+  const queryWords = extractMeaningfulSearchWords(query).filter(
+    (word) => word.length >= MIN_SEARCH_LENGTH,
+  );
+
+  if (queryWords.length === 0) {
+    return 0;
+  }
+
+  const candidateWords = buildCandidateWords(result);
+
+  if (candidateWords.length === 0) {
+    return 0;
+  }
+
+  let totalScore = 0;
+
+  for (const queryWord of queryWords) {
+    const bestScore = computeBestTypoWordScore(queryWord, candidateWords);
+
+    if (bestScore === 0) {
+      return 0;
+    }
+
+    totalScore += bestScore;
+  }
+
+  return totalScore;
+}
+
+function computeBestTypoWordScore(queryWord, candidateWords) {
+  let bestScore = 0;
+
+  for (const candidateWord of candidateWords) {
+    if (candidateWord === queryWord) {
+      return 90;
+    }
+
+    if (
+      candidateWord.startsWith(queryWord) ||
+      queryWord.startsWith(candidateWord)
+    ) {
+      bestScore = Math.max(bestScore, 75);
+      continue;
+    }
+
+    const maxDistance = getAllowedTypoDistance(queryWord, candidateWord);
+
+    if (maxDistance === 0) {
+      continue;
+    }
+
+    const distance = boundedLevenshteinDistance(
+      queryWord,
+      candidateWord,
+      maxDistance,
+    );
+
+    if (distance === null) {
+      continue;
+    }
+
+    bestScore = Math.max(bestScore, 70 - distance * 15);
+  }
+
+  return bestScore;
+}
+
+function getAllowedTypoDistance(leftWord, rightWord) {
+  const maxLength = Math.max(leftWord.length, rightWord.length);
+
+  if (maxLength < 5) {
+    return 0;
+  }
+
+  if (maxLength < 9) {
+    return 1;
+  }
+
+  return 2;
+}
+
+function boundedLevenshteinDistance(left, right, maxDistance) {
+  if (Math.abs(left.length - right.length) > maxDistance) {
+    return null;
+  }
+
+  let previousPreviousRow = null;
+  let previousRow = Array.from({ length: right.length + 1 }, (_, index) => index);
+
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const currentRow = [leftIndex];
+    let rowMinimum = currentRow[0];
+
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const substitutionCost =
+        left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
+      const nextValue = Math.min(
+        previousRow[rightIndex] + 1,
+        currentRow[rightIndex - 1] + 1,
+        previousRow[rightIndex - 1] + substitutionCost,
+      );
+
+      let boundedValue = nextValue;
+
+      if (
+        previousPreviousRow &&
+        leftIndex > 1 &&
+        rightIndex > 1 &&
+        left[leftIndex - 1] === right[rightIndex - 2] &&
+        left[leftIndex - 2] === right[rightIndex - 1]
+      ) {
+        boundedValue = Math.min(
+          boundedValue,
+          previousPreviousRow[rightIndex - 2] + 1,
+        );
+      }
+
+      currentRow.push(boundedValue);
+      rowMinimum = Math.min(rowMinimum, boundedValue);
+    }
+
+    if (rowMinimum > maxDistance) {
+      return null;
+    }
+
+    previousPreviousRow = previousRow;
+    previousRow = currentRow;
+  }
+
+  return previousRow[right.length] <= maxDistance ? previousRow[right.length] : null;
 }
 
 function cleanTitleCandidate(candidate) {
@@ -747,4 +1044,19 @@ function extractIsbn(identifiers) {
   );
 
   return isbn10?.identifier?.trim() || null;
+}
+
+function buildIsbnVariants(rawIsbn) {
+  const compact = String(rawIsbn ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^0-9X]/g, "");
+
+  if (compact.length < 10) {
+    return [];
+  }
+
+  const hyphenated = String(rawIsbn ?? "").trim();
+
+  return Array.from(new Set([compact, hyphenated].filter(Boolean)));
 }

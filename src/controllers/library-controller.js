@@ -9,12 +9,14 @@ import {
   finishDraft,
   getActiveDraft,
   getBookById,
+  listCatalogBookSubmissions,
   getCatalogCorrectionSuggestionsForBook,
   getBookRecap,
   getLatestSessionForBook,
   getLibrarySnapshot,
   listCatalogCorrectionSuggestions,
   listBooks,
+  moderateCatalogBookSubmission,
   moderateCatalogCorrectionSuggestion,
   saveDraft,
   seedLibrary,
@@ -25,9 +27,10 @@ import {
   updateDraftNote,
   updateDraftPage,
 } from "../services/library-service.js";
-import { searchGoogleBooks } from "../services/google-books-service.js";
+import { searchBookByIsbn, searchGoogleBooks } from "../services/google-books-service.js";
 import { HttpError } from "../utils/http-error.js";
 import {
+  optionalPositiveInteger,
   optionalNoteReference,
   optionalString,
   optionalStringArray,
@@ -63,6 +66,16 @@ export async function getCatalogCorrections(request, response) {
   response.json(await listCatalogCorrectionSuggestions(status || undefined));
 }
 
+export async function getCatalogSubmissions(request, response) {
+  const status = optionalString(request.query.status);
+
+  if (status && !["pending", "accepted", "rejected"].includes(status)) {
+    throw new HttpError(400, "status must be pending, accepted, or rejected.");
+  }
+
+  response.json(await listCatalogBookSubmissions(status || undefined));
+}
+
 export async function getCatalogBookCorrections(request, response) {
   ensureObjectId(request.params.catalogBookId, "catalogBookId");
   const status = optionalString(request.query.status);
@@ -88,8 +101,8 @@ export async function patchCatalogCorrection(request, response) {
   );
   const action = requireString(request.body.action, "action");
 
-  if (!["title", "author", "publisher"].includes(field)) {
-    throw new HttpError(400, "field must be title, author, or publisher.");
+  if (!["title", "author", "publisher", "seriesName"].includes(field)) {
+    throw new HttpError(400, "field must be title, author, publisher, or seriesName.");
   }
 
   if (!["accept", "reject"].includes(action)) {
@@ -101,6 +114,26 @@ export async function patchCatalogCorrection(request, response) {
       catalogBookId: request.body.catalogBookId,
       field,
       normalizedProposedValue,
+      action,
+    }),
+  );
+}
+
+export async function patchCatalogSubmission(request, response) {
+  const normalizedTitle = requireString(request.body.normalizedTitle, "normalizedTitle");
+  const normalizedAuthor = requireString(request.body.normalizedAuthor, "normalizedAuthor");
+  const normalizedPublisher = optionalString(request.body.normalizedPublisher);
+  const action = requireString(request.body.action, "action");
+
+  if (!["accept", "reject"].includes(action)) {
+    throw new HttpError(400, "action must be accept or reject.");
+  }
+
+  response.json(
+    await moderateCatalogBookSubmission({
+      normalizedTitle,
+      normalizedAuthor,
+      normalizedPublisher,
       action,
     }),
   );
@@ -144,6 +177,8 @@ export async function createTbrBook(request, response) {
       author,
       totalPages,
       publisher: optionalString(request.body.publisher),
+      seriesName: optionalString(request.body.seriesName),
+      seriesNumber: optionalPositiveInteger(request.body.seriesNumber, "seriesNumber"),
       thumbnail: optionalString(request.body.thumbnail),
       googleBookId: optionalString(request.body.googleBookId),
       catalogBookId: catalogBookId || null,
@@ -157,6 +192,11 @@ export async function searchBooks(request, response) {
   response.json(await searchGoogleBooks(query));
 }
 
+export async function searchBookByBarcode(request, response) {
+  const isbn = requireString(request.body.isbn, "isbn", { minLength: 10 });
+  response.json(await searchBookByIsbn(isbn));
+}
+
 export async function patchBookDetails(request, response) {
   const title = requireString(request.body.title, "title");
   const author = requireString(request.body.author, "author");
@@ -168,6 +208,8 @@ export async function patchBookDetails(request, response) {
       author,
       totalPages,
       publisher: optionalString(request.body.publisher),
+      seriesName: optionalString(request.body.seriesName),
+      seriesNumber: optionalPositiveInteger(request.body.seriesNumber, "seriesNumber"),
       thumbnail: optionalString(request.body.thumbnail),
     }),
   );

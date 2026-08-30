@@ -1,16 +1,20 @@
 import { Book } from "../models/Book.js";
 import { CatalogBook } from "../models/CatalogBook.js";
 import { CatalogCorrectionSuggestion } from "../models/CatalogCorrectionSuggestion.js";
+import { CatalogBookSubmission } from "../models/CatalogBookSubmission.js";
 import { ReadingDraft } from "../models/ReadingDraft.js";
 import { ReadingSession } from "../models/ReadingSession.js";
 import { upsertCatalogBookFromGoogleById } from "./google-books-service.js";
 import { HttpError } from "../utils/http-error.js";
 import {
   buildSearchTokenPrefixes,
+  extractMeaningfulSearchWords,
   normalizeSearchText,
 } from "../utils/search-normalization.js";
 
 const CORRECTION_PROMOTION_THRESHOLD = 2;
+const MANUAL_CATALOG_SOURCE = "manual_submission";
+const MIN_SEARCH_WORD_LENGTH = 3;
 const TITLE_SEGMENT_SEPARATORS_REGEX = /\s[-:|]\s/g;
 const TITLE_NOISE_REGEX =
   /\b(e book|ebook|tome|vol|volume|book)\b|\b[0-9ivxlcdm]+\b/gu;
@@ -71,6 +75,8 @@ export function serializeBook(book) {
     title: book.title,
     author: book.author,
     publisher: book.publisher,
+    seriesName: book.seriesName,
+    seriesNumber: book.seriesNumber,
     totalPages: book.totalPages,
     status: book.status,
     currentPage: book.currentPage,
@@ -180,11 +186,11 @@ export async function getBookById(auth, bookId) {
 
 export async function createBook(auth, payload) {
   let catalogBookId = payload.catalogBookId ?? null;
-  let sourceCatalogBook = null;
   let createCorrectionBaseline = null;
+  let catalogReview = null;
 
   if (catalogBookId) {
-    sourceCatalogBook = await CatalogBook.findById(catalogBookId);
+    const sourceCatalogBook = await CatalogBook.findById(catalogBookId);
     createCorrectionBaseline = sourceCatalogBook
       ? getCatalogSharedValues(sourceCatalogBook)
       : getSourceSelectionSharedValues(payload.sourceSelection);
@@ -194,7 +200,6 @@ export async function createBook(auth, payload) {
     try {
       const catalogBook = await upsertCatalogBookFromGoogleById(payload.googleBookId);
       catalogBookId = catalogBook?._id ?? null;
-      sourceCatalogBook = catalogBook;
       createCorrectionBaseline = catalogBook
         ? getCatalogSharedValues(catalogBook)
         : getSourceSelectionSharedValues(payload.sourceSelection);
@@ -204,8 +209,20 @@ export async function createBook(auth, payload) {
         payload.googleBookId,
       );
       catalogBookId = fallbackCatalogBook?._id ?? null;
-      sourceCatalogBook = fallbackCatalogBook;
       createCorrectionBaseline = getSourceSelectionSharedValues(payload.sourceSelection);
+    }
+  }
+
+  if (!catalogBookId && !payload.googleBookId) {
+    const matchedCatalogBook = await findSimilarCatalogBookForPayload(payload);
+
+    if (matchedCatalogBook) {
+      catalogBookId = matchedCatalogBook._id;
+      createCorrectionBaseline = getCatalogSharedValues(matchedCatalogBook);
+      catalogReview = {
+        status: "matched_existing",
+        catalogBookId: matchedCatalogBook._id.toString(),
+      };
     }
   }
 
@@ -214,6 +231,11 @@ export async function createBook(auth, payload) {
     title: payload.title,
     author: payload.author,
     publisher: payload.publisher ?? "",
+    seriesName: payload.seriesName ?? "",
+    seriesNumber:
+      typeof payload.seriesNumber === "number" && payload.seriesNumber > 0
+        ? payload.seriesNumber
+        : null,
     totalPages: Math.max(1, payload.totalPages),
     status: "tbr",
     currentPage: 0,
@@ -230,7 +252,21 @@ export async function createBook(auth, payload) {
     );
   }
 
-  return serializeBook(createdBook);
+  if (!createdBook.catalogBookId && !payload.googleBookId) {
+    const submission = await createCatalogBookSubmission(createdBook, payload);
+
+    if (submission) {
+      catalogReview = {
+        status: "pending_submission",
+        submissionId: submission._id.toString(),
+      };
+    }
+  }
+
+  return {
+    ...serializeBook(createdBook),
+    ...(catalogReview ? { catalogReview } : {}),
+  };
 }
 
 async function upsertCatalogBookFromSelectionPayload(selection, googleBookId) {
@@ -308,6 +344,7 @@ async function upsertCatalogBookFromSelectionPayload(selection, googleBookId) {
           author,
           publisher,
           seriesName: "",
+          seriesNumber: null,
         },
       },
     },
@@ -324,7 +361,209 @@ function getCatalogSharedValues(catalogBook) {
     publisher: String(
       catalogBook?.canonical?.publisher || catalogBook?.raw?.publisher || "",
     ).trim(),
+    seriesName: String(catalogBook?.canonical?.seriesName || "").trim(),
+    seriesNumber:
+      typeof catalogBook?.canonical?.seriesNumber === "number" &&
+      catalogBook.canonical.seriesNumber > 0
+        ? catalogBook.canonical.seriesNumber
+        : null,
   };
+}
+
+async function findSimilarCatalogBookForPayload(payload) {
+  const title = String(payload?.title ?? "").trim();
+  const author = String(payload?.author ?? "").trim();
+  const publisher = String(payload?.publisher ?? "").trim();
+
+  if (!title || !author) {
+    return null;
+  }
+
+  const normalizedTitle = normalizeSearchText(title);
+  const normalizedAuthor = normalizeSearchText(author);
+  const normalizedPublisher = normalizeSearchText(publisher);
+  const titleCandidates = buildTitleCandidates(title);
+  const titleWords = extractMeaningfulSearchWords(title).filter(
+    (word) => word.length >= MIN_SEARCH_WORD_LENGTH,
+  );
+  const authorWords = extractMeaningfulSearchWords(author).filter(
+    (word) => word.length >= MIN_SEARCH_WORD_LENGTH,
+  );
+  const strictTokens = Array.from(
+    new Set([...titleWords.slice(0, 3), ...authorWords.slice(0, 2)]),
+  );
+
+  if (strictTokens.length === 0) {
+    return null;
+  }
+
+  const strictCandidates = await CatalogBook.find({
+    "search.searchTokens": { $all: strictTokens },
+  })
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .limit(25);
+
+  const fallbackTokens = Array.from(
+    new Set([...titleWords.slice(0, 2), ...authorWords.slice(0, 1)]),
+  );
+  const fallbackCandidates =
+    strictCandidates.length > 0 || fallbackTokens.length === 0
+      ? []
+      : await CatalogBook.find({
+          "search.searchTokens": { $all: fallbackTokens },
+        })
+          .sort({ updatedAt: -1, createdAt: -1 })
+          .limit(25);
+
+  const seenIds = new Set();
+  const candidates = [...strictCandidates, ...fallbackCandidates].filter((candidate) => {
+    const id = candidate?._id?.toString?.();
+
+    if (!id || seenIds.has(id)) {
+      return false;
+    }
+
+    seenIds.add(id);
+    return true;
+  });
+
+  let bestCandidate = null;
+  let bestScore = 0;
+
+  for (const candidate of candidates) {
+    const score = scoreCatalogMatch(candidate, {
+      normalizedTitle,
+      normalizedAuthor,
+      normalizedPublisher,
+      titleCandidates,
+      totalPages:
+        typeof payload?.totalPages === "number" && payload.totalPages > 0
+          ? payload.totalPages
+          : null,
+    });
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = candidate;
+    }
+  }
+
+  return bestScore >= 10 ? bestCandidate : null;
+}
+
+function scoreCatalogMatch(candidate, input) {
+  const candidateTitle = normalizeSearchText(
+    candidate?.canonical?.title || candidate?.raw?.title || "",
+  );
+  const candidateAuthor = normalizeSearchText(
+    candidate?.canonical?.author || candidate?.raw?.authors?.[0] || "",
+  );
+  const candidatePublisher = normalizeSearchText(
+    candidate?.canonical?.publisher || candidate?.raw?.publisher || "",
+  );
+  const candidateTitleCandidates = Array.isArray(candidate?.search?.titleCandidates)
+    ? candidate.search.titleCandidates.map((value) => normalizeSearchText(value)).filter(Boolean)
+    : [];
+  const exactTitleMatch =
+    candidateTitle === input.normalizedTitle ||
+    candidateTitleCandidates.includes(input.normalizedTitle) ||
+    input.titleCandidates.includes(candidateTitle) ||
+    candidateTitleCandidates.some((value) => input.titleCandidates.includes(value));
+  const titleOverlap = computeWordOverlap(candidateTitle, input.normalizedTitle);
+  const authorOverlap = computeWordOverlap(candidateAuthor, input.normalizedAuthor);
+  const publisherExact =
+    input.normalizedPublisher.length > 0 && candidatePublisher === input.normalizedPublisher;
+  const pageClose =
+    typeof input.totalPages === "number" &&
+    typeof candidate?.raw?.pageCount === "number" &&
+    Math.abs(candidate.raw.pageCount - input.totalPages) <= 5;
+  const strongEnough =
+    (exactTitleMatch && authorOverlap >= 0.75) ||
+    (titleOverlap >= 0.85 && authorOverlap >= 0.85);
+
+  if (!strongEnough) {
+    return 0;
+  }
+
+  let score = 0;
+
+  if (exactTitleMatch) {
+    score += 7;
+  }
+
+  if (candidateAuthor === input.normalizedAuthor) {
+    score += 4;
+  } else if (authorOverlap >= 0.85) {
+    score += 3;
+  } else if (authorOverlap >= 0.75) {
+    score += 2;
+  }
+
+  if (titleOverlap >= 0.95) {
+    score += 3;
+  } else if (titleOverlap >= 0.85) {
+    score += 2;
+  }
+
+  if (publisherExact) {
+    score += 1;
+  }
+
+  if (pageClose) {
+    score += 1;
+  }
+
+  return score;
+}
+
+function computeWordOverlap(left, right) {
+  const leftWords = extractMeaningfulSearchWords(left);
+  const rightWords = extractMeaningfulSearchWords(right);
+
+  if (leftWords.length === 0 || rightWords.length === 0) {
+    return 0;
+  }
+
+  const rightWordSet = new Set(rightWords);
+  const matchingCount = leftWords.filter((word) => rightWordSet.has(word)).length;
+  return matchingCount / Math.max(leftWords.length, rightWords.length);
+}
+
+async function createCatalogBookSubmission(book, payload) {
+  const title = String(payload?.title ?? "").trim();
+  const author = String(payload?.author ?? "").trim();
+
+  if (!book?._id || !title || !author) {
+    return null;
+  }
+
+  return CatalogBookSubmission.findOneAndUpdate(
+    {
+      normalizedTitle: normalizeSearchText(title),
+      normalizedAuthor: normalizeSearchText(author),
+      normalizedPublisher: normalizeSearchText(payload?.publisher ?? ""),
+      proposedByBookId: book._id,
+    },
+    {
+      $setOnInsert: {
+        title,
+        author,
+        publisher: String(payload?.publisher ?? "").trim(),
+        seriesName: String(payload?.seriesName ?? "").trim(),
+        seriesNumber:
+          typeof payload?.seriesNumber === "number" && payload.seriesNumber > 0
+            ? payload.seriesNumber
+            : null,
+        totalPages: Math.max(1, payload?.totalPages || 1),
+        thumbnail: String(payload?.thumbnail ?? "").trim(),
+        status: "pending",
+      },
+    },
+    {
+      upsert: true,
+      new: true,
+    },
+  );
 }
 
 function getSourceSelectionSharedValues(sourceSelection) {
@@ -354,11 +593,18 @@ export async function updateBookDetails(auth, bookId, payload) {
     title: book.title,
     author: book.author,
     publisher: book.publisher,
+    seriesName: book.seriesName,
+    seriesNumber: book.seriesNumber,
   };
 
   book.title = payload.title;
   book.author = payload.author;
   book.publisher = payload.publisher ?? "";
+  book.seriesName = payload.seriesName ?? "";
+  book.seriesNumber =
+    typeof payload.seriesNumber === "number" && payload.seriesNumber > 0
+      ? payload.seriesNumber
+      : null;
   book.totalPages = Math.max(1, payload.totalPages);
   book.thumbnail = payload.thumbnail ?? "";
   book.currentPage = Math.min(book.currentPage, book.totalPages);
@@ -379,7 +625,7 @@ async function recordCatalogCorrectionSuggestions(book, previousSharedValues, pa
     return;
   }
 
-  const sharedFields = ["title", "author", "publisher"];
+  const sharedFields = ["title", "author", "publisher", "seriesName"];
 
   for (const field of sharedFields) {
     const previousValue = String(previousSharedValues[field] ?? "").trim();
@@ -593,6 +839,58 @@ async function aggregateCatalogCorrectionSuggestions(match) {
   });
 }
 
+async function aggregateCatalogBookSubmissions(match) {
+  const groupedSubmissions = await CatalogBookSubmission.aggregate([
+    {
+      $match: match,
+    },
+    {
+      $group: {
+        _id: {
+          normalizedTitle: "$normalizedTitle",
+          normalizedAuthor: "$normalizedAuthor",
+          normalizedPublisher: "$normalizedPublisher",
+          status: "$status",
+        },
+        title: { $first: "$title" },
+        author: { $first: "$author" },
+        publisher: { $first: "$publisher" },
+        seriesName: { $first: "$seriesName" },
+        seriesNumber: { $first: "$seriesNumber" },
+        totalPages: { $max: "$totalPages" },
+        thumbnail: { $first: "$thumbnail" },
+        createdCatalogBookId: { $first: "$createdCatalogBookId" },
+        count: { $sum: 1 },
+        latestUpdatedAt: { $max: "$updatedAt" },
+        firstCreatedAt: { $min: "$createdAt" },
+      },
+    },
+    {
+      $sort: {
+        latestUpdatedAt: -1,
+      },
+    },
+  ]);
+
+  return groupedSubmissions.map((entry) => ({
+    normalizedTitle: entry._id.normalizedTitle,
+    normalizedAuthor: entry._id.normalizedAuthor,
+    normalizedPublisher: entry._id.normalizedPublisher,
+    status: entry._id.status,
+    title: entry.title,
+    author: entry.author,
+    publisher: entry.publisher,
+    seriesName: entry.seriesName,
+    seriesNumber: entry.seriesNumber ?? null,
+    totalPages: entry.totalPages,
+    thumbnail: entry.thumbnail,
+    createdCatalogBookId: entry.createdCatalogBookId?.toString?.() ?? null,
+    count: entry.count,
+    firstCreatedAt: entry.firstCreatedAt?.toISOString?.() ?? null,
+    latestUpdatedAt: entry.latestUpdatedAt?.toISOString?.() ?? null,
+  }));
+}
+
 export async function deleteBookById(auth, bookId) {
   const book = await findOwnedBookOrThrow(auth, bookId);
 
@@ -684,6 +982,12 @@ export async function listCatalogCorrectionSuggestions(status) {
   });
 }
 
+export async function listCatalogBookSubmissions(status) {
+  return aggregateCatalogBookSubmissions({
+    ...(status ? { status } : {}),
+  });
+}
+
 export async function getCatalogCorrectionSuggestionsForBook(catalogBookId, status) {
   const catalogBook = await CatalogBook.findById(catalogBookId);
 
@@ -763,6 +1067,168 @@ export async function moderateCatalogCorrectionSuggestion({
   });
 
   return updatedAggregate ?? null;
+}
+
+export async function moderateCatalogBookSubmission({
+  normalizedTitle,
+  normalizedAuthor,
+  normalizedPublisher,
+  action,
+}) {
+  const matchingSubmissions = await CatalogBookSubmission.find({
+    normalizedTitle,
+    normalizedAuthor,
+    normalizedPublisher,
+  }).sort({ createdAt: 1 });
+
+  if (matchingSubmissions.length === 0) {
+    throw new HttpError(404, "Catalog book submission not found.");
+  }
+
+  if (action === "reject") {
+    await CatalogBookSubmission.updateMany(
+      {
+        normalizedTitle,
+        normalizedAuthor,
+        normalizedPublisher,
+      },
+      {
+        $set: {
+          status: "rejected",
+        },
+      },
+    );
+  } else {
+    const acceptedSubmission = matchingSubmissions[0];
+    let catalogBook = await findSimilarCatalogBookForPayload(acceptedSubmission);
+
+    if (!catalogBook) {
+      catalogBook = await createCatalogBookFromManualSubmission(acceptedSubmission);
+    }
+
+    if (!catalogBook?._id) {
+      throw new HttpError(400, "Unable to create catalog book from submission.");
+    }
+
+    const proposedBookIds = matchingSubmissions
+      .map((submission) => submission.proposedByBookId)
+      .filter(Boolean);
+
+    await Book.updateMany(
+      {
+        _id: { $in: proposedBookIds },
+        catalogBookId: null,
+      },
+      {
+        $set: {
+          catalogBookId: catalogBook._id,
+        },
+      },
+    );
+
+    await CatalogBookSubmission.updateMany(
+      {
+        normalizedTitle,
+        normalizedAuthor,
+        normalizedPublisher,
+      },
+      {
+        $set: {
+          status: "accepted",
+          createdCatalogBookId: catalogBook._id,
+        },
+      },
+    );
+  }
+
+  const [updatedAggregate] = await aggregateCatalogBookSubmissions({
+    normalizedTitle,
+    normalizedAuthor,
+    normalizedPublisher,
+  });
+
+  return updatedAggregate ?? null;
+}
+
+async function createCatalogBookFromManualSubmission(submission) {
+  const title = String(submission?.title ?? "").trim();
+  const author = String(submission?.author ?? "").trim();
+  const publisher = String(submission?.publisher ?? "").trim();
+  const seriesName = String(submission?.seriesName ?? "").trim();
+  const seriesNumber =
+    typeof submission?.seriesNumber === "number" && submission.seriesNumber > 0
+      ? submission.seriesNumber
+      : null;
+  const thumbnail = String(submission?.thumbnail ?? "").trim();
+  const pageCount =
+    typeof submission?.totalPages === "number" && submission.totalPages > 0
+      ? submission.totalPages
+      : null;
+
+  if (!submission?._id || !title || !author || !pageCount) {
+    return null;
+  }
+
+  const titleCandidates = buildTitleCandidates(title);
+  const normalizedTitle = normalizeSearchText(title);
+  const normalizedAuthor = normalizeSearchText(author);
+  const normalizedPublisher = normalizeSearchText(publisher);
+  const normalizedSearchBlob = Array.from(
+    new Set(
+      [normalizedTitle, normalizedAuthor, normalizedPublisher, ...titleCandidates].filter(Boolean),
+    ),
+  ).join(" ");
+  const searchTokens = buildSearchTokenPrefixes([
+    normalizedTitle,
+    normalizedAuthor,
+    normalizedPublisher,
+    ...titleCandidates,
+  ]);
+
+  return CatalogBook.findOneAndUpdate(
+    { source: MANUAL_CATALOG_SOURCE, sourceId: submission._id.toString() },
+    {
+      $set: {
+        raw: {
+          title,
+          subtitle: "",
+          authors: [author],
+          publisher,
+          pageCount,
+          language: "",
+          industryIdentifiers: [],
+          thumbnail,
+        },
+        canonical: {
+          title,
+          subtitle: "",
+          author,
+          publisher,
+          seriesName,
+          seriesNumber,
+        },
+        search: {
+          aliases: [],
+          titleCandidates,
+          subtitleCandidates: [],
+          normalizedTitle,
+          normalizedSubtitle: "",
+          normalizedAuthor,
+          normalizedPublisher,
+          normalizedSearchBlob,
+          searchTokens,
+        },
+        quality: {
+          hasCover: Boolean(thumbnail),
+          hasIsbn: false,
+          pageCount,
+          language: "",
+        },
+        lastFetchedAt: null,
+      },
+    },
+    { upsert: true, new: true },
+  );
 }
 
 export async function getActiveDraft(auth) {

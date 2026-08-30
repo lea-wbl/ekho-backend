@@ -10,6 +10,7 @@ import {
   featureBook,
   getCatalogBookCorrections,
   getCatalogCorrections,
+  getCatalogSubmissions,
   getBook,
   getBooks,
   getDraft,
@@ -17,6 +18,7 @@ import {
   getLibrary,
   getRecap,
   patchCatalogCorrection,
+  patchCatalogSubmission,
   patchDraftPage,
   patchDraftNote,
   patchReminder,
@@ -24,6 +26,7 @@ import {
   persistDraft,
   patchBookDetails,
   saveReview,
+  searchBookByBarcode,
   searchBooks,
   seed,
   startDraft,
@@ -35,11 +38,14 @@ libraryRouter.post("/seed", asyncHandler(seed));
 libraryRouter.get("/library", asyncHandler(getLibrary));
 libraryRouter.get("/books", asyncHandler(getBooks));
 libraryRouter.get("/catalog/corrections", asyncHandler(getCatalogCorrections));
+libraryRouter.get("/catalog/submissions", asyncHandler(getCatalogSubmissions));
 libraryRouter.get("/catalog/:catalogBookId/corrections", asyncHandler(getCatalogBookCorrections));
 libraryRouter.patch("/catalog/corrections", asyncHandler(patchCatalogCorrection));
+libraryRouter.patch("/catalog/submissions", asyncHandler(patchCatalogSubmission));
 libraryRouter.get("/books/:bookId", asyncHandler(getBook));
 libraryRouter.post("/books", asyncHandler(createTbrBook));
 libraryRouter.post("/books/search", asyncHandler(searchBooks));
+libraryRouter.post("/books/search/isbn", asyncHandler(searchBookByBarcode));
 libraryRouter.patch("/books/:bookId", asyncHandler(patchBookDetails));
 libraryRouter.delete("/books/:bookId", asyncHandler(deleteBook));
 libraryRouter.patch("/books/:bookId/featured", asyncHandler(featureBook));

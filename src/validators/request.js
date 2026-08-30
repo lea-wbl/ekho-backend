@@ -18,6 +18,20 @@ export function optionalString(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+export function optionalPositiveInteger(value, fieldName) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const parsed = Number.parseInt(String(value), 10);
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new HttpError(400, `${fieldName} must be a positive integer.`);
+  }
+
+  return parsed;
+}
+
 export function optionalStringArray(value, fieldName) {
   if (value === undefined || value === null) {
     return [];

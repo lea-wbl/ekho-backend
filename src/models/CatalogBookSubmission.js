@@ -1,11 +1,11 @@
 import mongoose from "mongoose";
 
-const bookSchema = new mongoose.Schema(
+const catalogBookSubmissionSchema = new mongoose.Schema(
   {
-    userId: {
-      type: String,
+    proposedByBookId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Book",
       required: true,
-      trim: true,
       index: true,
     },
     title: {
@@ -38,57 +38,39 @@ const bookSchema = new mongoose.Schema(
       required: true,
       min: 1,
     },
-    status: {
-      type: String,
-      enum: ["tbr", "reading", "finished"],
-      default: "tbr",
-    },
-    currentPage: {
-      type: Number,
-      default: 0,
-      min: 0,
-    },
     thumbnail: {
       type: String,
       trim: true,
       default: "",
     },
-    googleBookId: {
+    normalizedTitle: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+    normalizedAuthor: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+    normalizedPublisher: {
       type: String,
       trim: true,
       default: "",
+      index: true,
     },
-    catalogBookId: {
+    createdCatalogBookId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "CatalogBook",
       default: null,
     },
-    startedAt: {
-      type: Date,
-      default: null,
-    },
-    lastReadAt: {
-      type: Date,
-      default: null,
-    },
-    finishedAt: {
-      type: Date,
-      default: null,
-    },
-    rating: {
-      type: Number,
-      min: 1,
-      max: 5,
-      default: null,
-    },
-    globalFeeling: {
+    status: {
       type: String,
-      trim: true,
-      default: "",
-    },
-    isFeatured: {
-      type: Boolean,
-      default: false,
+      enum: ["pending", "accepted", "rejected"],
+      default: "pending",
+      index: true,
     },
   },
   {
@@ -97,7 +79,17 @@ const bookSchema = new mongoose.Schema(
   },
 );
 
-bookSchema.index({ userId: 1, createdAt: 1 });
-bookSchema.index({ userId: 1, status: 1, lastReadAt: -1 });
+catalogBookSubmissionSchema.index(
+  {
+    normalizedTitle: 1,
+    normalizedAuthor: 1,
+    normalizedPublisher: 1,
+    proposedByBookId: 1,
+  },
+  { unique: true },
+);
 
-export const Book = mongoose.model("Book", bookSchema);
+export const CatalogBookSubmission = mongoose.model(
+  "CatalogBookSubmission",
+  catalogBookSubmissionSchema,
+);

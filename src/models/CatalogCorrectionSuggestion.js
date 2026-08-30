@@ -16,7 +16,7 @@ const catalogCorrectionSuggestionSchema = new mongoose.Schema(
     },
     field: {
       type: String,
-      enum: ["title", "author", "publisher"],
+      enum: ["title", "author", "publisher", "seriesName"],
       required: true,
       index: true,
     },
