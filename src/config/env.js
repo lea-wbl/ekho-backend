@@ -1,6 +1,10 @@
 import dotenv from "dotenv";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-dotenv.config();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 const parseOrigins = (value) =>
   (value ?? "")
@@ -20,4 +24,10 @@ export const env = {
   clerkSecretKey: process.env.CLERK_SECRET_KEY ?? "",
   clerkJwtKey: process.env.CLERK_JWT_KEY ?? "",
   clerkAuthorizedParties: parseOrigins(process.env.CLERK_AUTHORIZED_PARTIES ?? ""),
+  openAiApiKey: process.env.OPENAI_API_KEY ?? "",
+  openAiNotesSummaryModel: process.env.OPENAI_NOTES_SUMMARY_MODEL ?? "gpt-5-nano",
+  aiNotesSummaryMonthlyLimit: Number.parseInt(
+    process.env.AI_NOTES_SUMMARY_MONTHLY_LIMIT ?? "20",
+    10,
+  ),
 };

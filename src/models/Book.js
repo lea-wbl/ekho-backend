@@ -86,6 +86,20 @@ const bookSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    notesSummary: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    notesSummaryStatus: {
+      type: String,
+      enum: ["", "saved", "dismissed"],
+      default: "",
+    },
+    notesSummaryGeneratedAt: {
+      type: Date,
+      default: null,
+    },
     isFeatured: {
       type: Boolean,
       default: false,

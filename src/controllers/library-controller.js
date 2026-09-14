@@ -7,6 +7,8 @@ import {
   discardDraft,
   dismissReminder,
   finishDraft,
+  generateBookNotesSummary,
+  getAiCostSummary,
   getActiveDraft,
   getBookById,
   listCatalogBookSubmissions,
@@ -234,11 +236,23 @@ export async function saveReview(request, response) {
     payload.globalFeeling = optionalString(request.body.globalFeeling);
   }
 
+  if (request.body.notesSummary !== undefined) {
+    payload.notesSummary = optionalString(request.body.notesSummary);
+  }
+
   response.json(await updateBookReview(request.auth, request.params.bookId, payload));
+}
+
+export async function createNotesSummary(request, response) {
+  response.json(await generateBookNotesSummary(request.auth, request.params.bookId));
 }
 
 export async function getRecap(request, response) {
   response.json(await getBookRecap(request.auth, request.params.bookId));
+}
+
+export async function getAiCosts(request, response) {
+  response.json(await getAiCostSummary(request.auth));
 }
 
 export async function getLatestSession(request, response) {

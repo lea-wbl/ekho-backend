@@ -2,8 +2,10 @@ import { Book } from "../models/Book.js";
 import { CatalogBook } from "../models/CatalogBook.js";
 import { CatalogCorrectionSuggestion } from "../models/CatalogCorrectionSuggestion.js";
 import { CatalogBookSubmission } from "../models/CatalogBookSubmission.js";
+import { AiUsage } from "../models/AiUsage.js";
 import { ReadingDraft } from "../models/ReadingDraft.js";
 import { ReadingSession } from "../models/ReadingSession.js";
+import { generateNotesSummaryWithAi } from "./ai-summary-service.js";
 import { upsertCatalogBookFromGoogleById } from "./google-books-service.js";
 import { HttpError } from "../utils/http-error.js";
 import {
@@ -88,6 +90,11 @@ export function serializeBook(book) {
     finishedAt: book.finishedAt ? book.finishedAt.toISOString() : null,
     rating: book.rating,
     globalFeeling: book.globalFeeling,
+    notesSummary: book.notesSummary,
+    notesSummaryStatus: book.notesSummaryStatus,
+    notesSummaryGeneratedAt: book.notesSummaryGeneratedAt
+      ? book.notesSummaryGeneratedAt.toISOString()
+      : null,
     isFeatured: book.isFeatured,
     createdAt: book.createdAt?.toISOString?.() ?? null,
     updatedAt: book.updatedAt?.toISOString?.() ?? null,
@@ -898,6 +905,7 @@ export async function deleteBookById(auth, bookId) {
     Book.deleteOne({ _id: book._id, ...getUserScope(auth) }),
     ReadingSession.deleteMany({ ...getUserScope(auth), bookId: book._id }),
     ReadingDraft.deleteMany({ ...getUserScope(auth), bookId: book._id }),
+    AiUsage.deleteMany({ ...getUserScope(auth), bookId: book._id }),
   ]);
 
   return { ok: true };
@@ -928,8 +936,79 @@ export async function updateBookReview(auth, bookId, payload) {
     book.globalFeeling = payload.globalFeeling;
   }
 
+  if (typeof payload.notesSummary === "string") {
+    book.notesSummary = payload.notesSummary.trim();
+    book.notesSummaryStatus = book.notesSummary ? "saved" : "dismissed";
+    book.notesSummaryGeneratedAt = book.notesSummary ? new Date() : null;
+  }
+
   await book.save();
   return serializeBook(book);
+}
+
+export async function generateBookNotesSummary(auth, bookId) {
+  const [book, sessions] = await Promise.all([
+    findOwnedBookOrThrow(auth, bookId),
+    ReadingSession.find({ ...getUserScope(auth), bookId }).sort({ createdAt: 1 }),
+  ]);
+
+  const serializedSessions = sessions.map(serializeSession);
+  const notes = serializedSessions.flatMap((session) => session.notes);
+  const result = await generateNotesSummaryWithAi({ auth, book, notes });
+
+  return {
+    book: serializeBook(book),
+    notesSummary: result.notesSummary,
+    usage: result.usage,
+  };
+}
+
+export async function getAiCostSummary(auth) {
+  const usageEntries = await AiUsage.find(getUserScope(auth)).sort({ createdAt: -1 }).limit(100);
+  const monthStart = new Date();
+  monthStart.setUTCDate(1);
+  monthStart.setUTCHours(0, 0, 0, 0);
+
+  const currentMonthEntries = usageEntries.filter(
+    (entry) => entry.createdAt && entry.createdAt >= monthStart,
+  );
+
+  return {
+    total: summarizeUsageEntries(usageEntries),
+    currentMonth: summarizeUsageEntries(currentMonthEntries),
+    recent: usageEntries.slice(0, 25).map((entry) => ({
+      id: entry._id.toString(),
+      bookId: entry.bookId.toString(),
+      feature: entry.feature,
+      model: entry.model,
+      inputTokens: entry.inputTokens,
+      outputTokens: entry.outputTokens,
+      totalTokens: entry.totalTokens,
+      estimatedCostUsd: entry.estimatedCostUsd,
+      inputCharacters: entry.inputCharacters,
+      noteCount: entry.noteCount,
+      createdAt: entry.createdAt?.toISOString?.() ?? null,
+    })),
+  };
+}
+
+function summarizeUsageEntries(entries) {
+  return entries.reduce(
+    (summary, entry) => ({
+      requestCount: summary.requestCount + 1,
+      inputTokens: summary.inputTokens + entry.inputTokens,
+      outputTokens: summary.outputTokens + entry.outputTokens,
+      totalTokens: summary.totalTokens + entry.totalTokens,
+      estimatedCostUsd: summary.estimatedCostUsd + entry.estimatedCostUsd,
+    }),
+    {
+      requestCount: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      estimatedCostUsd: 0,
+    },
+  );
 }
 
 export async function getBookRecap(auth, bookId) {

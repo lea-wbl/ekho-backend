@@ -3,12 +3,14 @@ import { asyncHandler } from "../utils/async-handler.js";
 import {
   createDraftNote,
   createDraftQuote,
+  createNotesSummary,
   createSessionNote,
   createTbrBook,
   deleteBook,
   deleteDraft,
   featureBook,
   getCatalogBookCorrections,
+  getAiCosts,
   getCatalogCorrections,
   getCatalogSubmissions,
   getBook,
@@ -39,6 +41,7 @@ libraryRouter.get("/library", asyncHandler(getLibrary));
 libraryRouter.get("/books", asyncHandler(getBooks));
 libraryRouter.get("/catalog/corrections", asyncHandler(getCatalogCorrections));
 libraryRouter.get("/catalog/submissions", asyncHandler(getCatalogSubmissions));
+libraryRouter.get("/development/ai-costs", asyncHandler(getAiCosts));
 libraryRouter.get("/catalog/:catalogBookId/corrections", asyncHandler(getCatalogBookCorrections));
 libraryRouter.patch("/catalog/corrections", asyncHandler(patchCatalogCorrection));
 libraryRouter.patch("/catalog/submissions", asyncHandler(patchCatalogSubmission));
@@ -50,6 +53,7 @@ libraryRouter.patch("/books/:bookId", asyncHandler(patchBookDetails));
 libraryRouter.delete("/books/:bookId", asyncHandler(deleteBook));
 libraryRouter.patch("/books/:bookId/featured", asyncHandler(featureBook));
 libraryRouter.patch("/books/:bookId/review", asyncHandler(saveReview));
+libraryRouter.post("/books/:bookId/notes-summary", asyncHandler(createNotesSummary));
 libraryRouter.get("/books/:bookId/recap", asyncHandler(getRecap));
 libraryRouter.get("/books/:bookId/latest-session", asyncHandler(getLatestSession));
 libraryRouter.get("/drafts/active", asyncHandler(getDraft));
