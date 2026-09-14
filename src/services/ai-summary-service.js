@@ -6,7 +6,7 @@ import { HttpError } from "../utils/http-error.js";
 const FEATURE_NOTES_SUMMARY = "notes_summary";
 const MAX_NOTES_PER_SUMMARY = 200;
 const MAX_NOTE_CHARACTERS = 40_000;
-const MAX_OUTPUT_TOKENS = 900;
+const MAX_OUTPUT_TOKENS = 1_800;
 
 const MODEL_PRICING_PER_MILLION = {
   "gpt-5-nano": {
@@ -73,13 +73,23 @@ export async function generateNotesSummaryWithAi({ auth, book, notes }) {
     model,
     input: prompt,
     max_output_tokens: MAX_OUTPUT_TOKENS,
+    reasoning: { effort: "low" },
     store: false,
   });
 
-  const notesSummary = response.output_text?.trim();
+  const notesSummary = extractResponseText(response).trim();
 
   if (!notesSummary) {
-    throw new HttpError(502, "OpenAI returned an empty summary.");
+    const incompleteReason = response.incomplete_details?.reason;
+
+    if (response.status === "incomplete" && incompleteReason === "max_output_tokens") {
+      throw new HttpError(
+        502,
+        "OpenAI ran out of output tokens before returning a summary. Try again with a shorter set of notes.",
+      );
+    }
+
+    throw new HttpError(502, "OpenAI returned an empty summary. Try again in a moment.");
   }
 
   const usage = normalizeUsage(response.usage);
@@ -192,6 +202,29 @@ function normalizeUsage(usage) {
     outputTokens,
     totalTokens: usage?.total_tokens ?? inputTokens + outputTokens,
   };
+}
+
+function extractResponseText(response) {
+  const outputText = typeof response.output_text === "string" ? response.output_text : "";
+
+  if (outputText.trim()) {
+    return outputText;
+  }
+
+  if (!Array.isArray(response.output)) {
+    return "";
+  }
+
+  return response.output
+    .flatMap((item) => (Array.isArray(item?.content) ? item.content : []))
+    .map((content) => {
+      if (typeof content?.text === "string") {
+        return content.text;
+      }
+
+      return "";
+    })
+    .join("");
 }
 
 function estimateCostUsd(model, usage) {
